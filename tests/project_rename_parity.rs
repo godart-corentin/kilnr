@@ -1241,10 +1241,31 @@ fn test_prepare_copies_captured_acl_data_to_staged_files() {
     let f = Fixture::new();
     #[cfg(target_os = "linux")]
     let inventory = {
-        let mut inventory = f.inventory().unwrap();
-        inventory.metadata_writes[0].facts.acl =
-            vec![("user.kilnr_test_acl".into(), b"marker".to_vec())];
-        inventory
+        use std::ffi::CString;
+        let source = f.roots.config.join(format!("{OLD}.json"));
+        let path = CString::new(source.as_os_str().as_encoded_bytes()).unwrap();
+        let name = CString::new("user.kilnr_test_acl").unwrap();
+        let marker = b"marker";
+        let result = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                marker.as_ptr().cast(),
+                marker.len(),
+                0,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error
+                .raw_os_error()
+                .is_some_and(|code| code == libc::ENOTSUP || code == libc::EOPNOTSUPP)
+            {
+                return;
+            }
+            panic!("cannot install source ACL fixture: {error}");
+        }
+        f.inventory().unwrap()
     };
     #[cfg(not(target_os = "linux"))]
     let inventory = f.inventory().unwrap();
