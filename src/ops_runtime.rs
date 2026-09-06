@@ -510,7 +510,7 @@ pub fn execute(args: &[String]) -> Result<()> {
         "/tmp:rw,nosuid,nodev,noexec,size=512m",
         "--tmpfs",
         &format!(
-            "/run/kilnr/tmp:rw,nosuid,nodev,size=512m,mode=0700,uid={uid},gid={gid}"
+            "/run/kilnr/tmp:rw,nosuid,nodev,exec,size=512m,mode=0700,uid={uid},gid={gid}"
         ),
     ]);
     for (key, value) in runtime_helpers::build_public_env(&rt, id, job, &roots)? {
