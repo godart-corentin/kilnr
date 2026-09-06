@@ -75,7 +75,7 @@ fn test_checked_in_ci_pipeline_parses_with_dogfooding_values() {
     .unwrap();
     let result = pipeline::load(&bytes, "ci", 3, &networks(), None).unwrap();
     assert_eq!(result["schema"], 1);
-    assert_eq!(result["max_parallel"], 1);
+    assert_eq!(result["max_parallel"], 2);
     assert_eq!(
         result["trigger"],
         json!({"type":"branch", "branches":["*"]})
@@ -86,11 +86,30 @@ fn test_checked_in_ci_pipeline_parses_with_dogfooding_values() {
             .unwrap()
             .keys()
             .collect::<Vec<_>>(),
-        vec!["tests"]
+        vec!["rust", "frontend"]
     );
-    assert_eq!(result["jobs"]["tests"]["image"], "rust:1.85-bookworm");
-    assert_eq!(result["jobs"]["tests"]["network"], "none");
-    assert_eq!(result["jobs"]["tests"]["run"], json!(["./tests/run.sh"]));
+    assert_eq!(result["jobs"]["rust"]["image"], "rust:1.85.1-bookworm");
+    assert_eq!(result["jobs"]["rust"]["network"], "kilnr-ci");
+    assert_eq!(
+        result["jobs"]["rust"]["run"],
+        json!([
+            "rustup component add clippy rustfmt",
+            "cargo test --all-targets --locked",
+            "cargo clippy --all-targets --locked -- -D warnings",
+            "cargo fmt --all -- --check",
+            "for unit in systemd/kilnr-controller.service systemd/kilnr-queue.path systemd/kilnr-network.service; do grep -q '^\\[Unit\\]$' \"$unit\"; done"
+        ])
+    );
+    assert_eq!(result["jobs"]["frontend"]["image"], "node:22-bookworm");
+    assert_eq!(result["jobs"]["frontend"]["network"], "kilnr-ci");
+    assert_eq!(
+        result["jobs"]["frontend"]["run"],
+        json!([
+            "npm --prefix web/frontend ci --no-audit --no-fund",
+            "npm --prefix web/frontend test",
+            "npm --prefix web/frontend run build"
+        ])
+    );
 }
 
 #[test]
