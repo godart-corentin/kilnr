@@ -28,13 +28,20 @@ if [[ "$MODE" != "--update" ]]; then
     apt-get update
 fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git make python3 acl curl iptables
+    git make acl curl iptables
 
 command -v docker >/dev/null || die "Docker is not installed. Install Docker first; Kilnr will not alter the daemon configuration."
 docker info >/dev/null 2>&1 || die "Docker daemon is not reachable"
 getent group docker >/dev/null || die "Docker group is missing; this installer expects a rootful Docker Engine"
 command -v systemctl >/dev/null || die "systemd is required"
 command -v git-shell >/dev/null || die "git-shell is missing"
+
+# Compile the pinned Rust application in a reproducible toolchain container.
+docker run --rm \
+    -v "$ROOT_DIR:/src" \
+    -w /src \
+    rust:1.85-bookworm \
+    cargo build --locked --release
 
 ensure_group() {
     local name="$1"
@@ -90,8 +97,8 @@ fi
 chown git:git /srv/git/.ssh/authorized_keys
 chmod 0600 /srv/git/.ssh/authorized_keys
 
-/usr/bin/python3 "$ROOT_DIR/libexec/kilnr_project_lock.py" \
-    --provision-production-namespace /var/lib/kilnr
+install -d -o root -g root -m 0755 /var/lib/kilnr /var/lib/kilnr/locks
+install -d -o root -g kilnr-submit -m 0750 /var/lib/kilnr/locks/projects
 install -d -o kilnr -g kilnr-submit -m 0710 /var/lib/kilnr/queue
 install -d -o kilnr -g kilnr-submit -m 3730 \
     /var/lib/kilnr/queue/tmp \
@@ -137,47 +144,44 @@ for project_config in /etc/kilnr/projects/*.json; do
     install -d -o root -g kilnr -m 0750 "/etc/kilnr/secrets/$project_name"
 done
 install -d -o root -g root -m 0755 /usr/local/libexec/kilnr /usr/local/libexec/kilnr/git-hooks
-# Remove the old project module name: it shadows Python stdlib secrets in enqueue.
-rm -f /usr/local/libexec/kilnr/secrets.py
-
+# Remove obsolete helper modules from installations created before the Rust
+# migration so an update cannot leave an executable legacy implementation.
+for obsolete in artifacts.py kilnr_permissions.py kilnr_project_lock.py kilnr_retention.py kilnr_secrets.py pipeline.py; do
+    rm -f "/usr/local/libexec/kilnr/$obsolete"
+done
 # CLI readers can traverse Kilnr state and read build output, but not queue/secrets.
 setfacl -m g:kilnr-readers:r-x,d:g:kilnr-readers:r-x /var/lib/kilnr/builds
 setfacl -R -m g:kilnr-readers:rX /var/lib/kilnr/builds
 setfacl -m u:git:rwx /var/lib/kilnr/queue/incoming
 find /var/lib/kilnr/builds -type d -exec chmod g-s {} +
 
-install -o root -g root -m 0755 "$ROOT_DIR/bin/kilnr" /usr/local/bin/kilnr
-install -o root -g root -m 0755 "$ROOT_DIR/web/server/kilnr_web.py" /usr/local/libexec/kilnr/web
+install -o root -g root -m 0755 "$ROOT_DIR/target/release/kilnr" /usr/local/bin/kilnr
+install -o root -g root -m 0755 "$ROOT_DIR/target/release/kilnr" /usr/local/libexec/kilnr/kilnr-agent
 
 install -d -o root -g root -m 0755 /usr/local/share/kilnr
 rm -rf /usr/local/share/kilnr/web-src
-cp -R "$ROOT_DIR/web" /usr/local/share/kilnr/web-src
+install -d -o root -g root -m 0755 /usr/local/share/kilnr/web-src
+cp "$ROOT_DIR/Cargo.toml" "$ROOT_DIR/Cargo.lock" /usr/local/share/kilnr/web-src/
+cp -R "$ROOT_DIR/src" "$ROOT_DIR/web/frontend" "$ROOT_DIR/web/Dockerfile" /usr/local/share/kilnr/web-src/
 rm -rf \
     /usr/local/share/kilnr/web-src/frontend/node_modules \
-    /usr/local/share/kilnr/web-src/frontend/dist \
-    /usr/local/share/kilnr/web-src/server/__pycache__
+    /usr/local/share/kilnr/web-src/frontend/dist
 chown -R root:root /usr/local/share/kilnr/web-src
 find /usr/local/share/kilnr/web-src -type d -exec chmod 0755 {} +
 find /usr/local/share/kilnr/web-src -type f -exec chmod 0644 {} +
-chmod 0755 /usr/local/share/kilnr/web-src/server/kilnr_web.py
-
-for module in pipeline.py artifacts.py kilnr_secrets.py kilnr_project_lock.py kilnr_permissions.py kilnr_retention.py; do
-    install -o root -g root -m 0644 "$ROOT_DIR/libexec/$module" "/usr/local/libexec/kilnr/$module"
-done
-
-# Repair permissions produced by older releases before installing commands
-# whose strict preflight depends on the current policy.
-/usr/bin/python3 /usr/local/libexec/kilnr/kilnr_permissions.py \
-    --normalize-builds /var/lib/kilnr/builds
-/usr/bin/python3 /usr/local/libexec/kilnr/kilnr_permissions.py \
-    --normalize-configured-repositories /etc/kilnr/projects
 
 for name in \
-    controller enqueue execute notify-discord rerun doctor cleanup \
+    controller enqueue execute notify-discord rerun cleanup web \
     project-create project-delete project-lock-run project-rename project-webhook-set \
-    secret-set secret-set-file secret-list secret-delete \
-    git-key-add network-setup network-teardown
+    secret-set secret-set-file secret-list secret-delete git-key-add config-tool permissions
 do
+    ln -sfn kilnr-agent "/usr/local/libexec/kilnr/$name"
+done
+
+/usr/local/libexec/kilnr/permissions --provision-lock-namespace /var/lib/kilnr
+/usr/local/libexec/kilnr/permissions --normalize-builds /var/lib/kilnr/builds
+
+for name in doctor network-setup network-teardown; do
     install -o root -g root -m 0755 "$ROOT_DIR/libexec/$name" "/usr/local/libexec/kilnr/$name"
 done
 
@@ -194,13 +198,7 @@ fi
 if [[ ! -f /etc/kilnr/network.env ]]; then
     SUBNET="${KILNR_CI_SUBNET:-172.30.0.0/24}"
     GATEWAY="$(
-        /usr/bin/python3 - "$SUBNET" <<'PY'
-import ipaddress, sys
-net = ipaddress.ip_network(sys.argv[1], strict=True)
-if net.version != 4 or net.prefixlen > 28:
-    raise SystemExit("Kilnr CI subnet must be an IPv4 network of /28 or larger")
-print(next(net.hosts()))
-PY
+        /usr/local/libexec/kilnr/config-tool gateway "$SUBNET"
     )"
 
     cat >/etc/kilnr/network.env <<EOF

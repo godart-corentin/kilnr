@@ -5,8 +5,14 @@ RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm inst
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.12-alpine
-WORKDIR /opt/kilnr
-COPY server/kilnr_web.py /opt/kilnr/web
+FROM rust:1.85-alpine AS backend
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --locked --release
+
+FROM scratch
 COPY --from=frontend /src/dist /opt/kilnr/static
-CMD ["python3", "/opt/kilnr/web"]
+COPY --from=backend /src/target/release/kilnr /opt/kilnr/web
+USER 65532:65532
+CMD ["/opt/kilnr/web"]

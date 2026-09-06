@@ -9,7 +9,7 @@
   "max_parallel": 1,
   "jobs": {
     "tests": {
-      "image": "python:3.12-bookworm",
+      "image": "rust:1.85-bookworm",
       "network": "none",
       "run": [
         "./tests/run.sh"

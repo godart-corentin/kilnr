@@ -46,6 +46,7 @@ Kilnr deliberately has no Jenkins/GitLab/GitHub Actions server, no database, and
 ## Requirements
 
 - Ubuntu 24.04 LTS or Ubuntu 26.04 LTS
+- Rust 1.85+ (the installer builds a locked release binary in a pinned Rust container)
 - systemd
 - Docker Engine already installed and running
 - rootful Docker with a `docker` group
