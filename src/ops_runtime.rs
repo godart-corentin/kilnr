@@ -141,31 +141,29 @@ fn skeleton(job: &Value, path: Option<&str>) -> Result<(PathBuf, Value)> {
     Ok((dir, status))
 }
 fn snapshot(job: &Value, cfg: &Value, dir: &Path) -> Result<()> {
-    let archive = dir.join(".source.tar");
-    let repo = cfg["repository"].as_str().unwrap();
-    let status = Command::new("/usr/bin/git")
+    let repo = cfg["repository"].as_str().context("missing repository")?;
+    let sha = job["sha"].as_str().context("missing job sha")?;
+    let mut child = Command::new("/usr/bin/git")
         .args([
             format!("--git-dir={repo}"),
             "archive".into(),
             "--format=tar".into(),
-            format!("--output={}", archive.display()),
-            job["sha"].as_str().unwrap().into(),
+            sha.into(),
         ])
-        .status()?;
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to start git archive")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("git archive stdout unavailable")?;
+    let unpack = tar::Archive::new(stdout)
+        .unpack(dir.join("src"))
+        .context("archive extraction failed");
+    let status = child.wait().context("failed to wait for git archive")?;
+    unpack?;
     if !status.success() {
         bail!("git archive failed")
-    };
-    let status = Command::new("/usr/bin/tar")
-        .args([
-            "-xf",
-            archive.to_str().unwrap(),
-            "-C",
-            dir.join("src").to_str().unwrap(),
-        ])
-        .status()?;
-    let _ = fs::remove_file(archive);
-    if !status.success() {
-        bail!("archive extraction failed")
     }
     Ok(())
 }
