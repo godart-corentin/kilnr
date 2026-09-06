@@ -107,7 +107,13 @@ pub fn validate_build(
         }
     }
     let received = timestamp(job.get("received_at"))?;
-    if captures[1] != received.format("%Y%m%dT%H%M%S%6fZ").to_string()
+    let id_received =
+        chrono::NaiveDateTime::parse_from_str(&captures[1], "%Y%m%dT%H%M%S%6fZ")
+            .context("invalid build id timestamp")?
+            .and_utc();
+    let received_skew = received.signed_duration_since(id_received);
+    if received_skew < chrono::Duration::zero()
+        || received_skew > chrono::Duration::seconds(1)
         || captures[3] != job["sha"].as_str().unwrap()[..7]
     {
         bail!("build id does not match timestamp/SHA")
