@@ -108,7 +108,7 @@ pub fn select_pipeline(job: &Value, cfg: &Value) -> Result<Option<(String, Value
     }
     if matches.len() > 1 {
         bail!("branch {source:?} matches multiple CI pipelines")
-    };
+    }
     let Some((path, raw)) = matches.pop() else {
         return Ok(None);
     };
@@ -477,6 +477,14 @@ pub fn execute(args: &[String]) -> Result<()> {
         wrapped.extend(argv);
         argv = wrapped;
     }
+    let home = dir.join("runtime").join(id).join("home");
+    fs::create_dir_all(&home)?;
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+    mounts.push(format!(
+        "type=bind,src={},dst=/run/kilnr/home",
+        home.display()
+    ));
+
     let uid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getegid() };
     let mut docker = Command::new("/usr/bin/docker");
@@ -511,10 +519,6 @@ pub fn execute(args: &[String]) -> Result<()> {
         "--tmpfs",
         &format!(
             "/run/kilnr/tmp:rw,nosuid,nodev,exec,size=512m,mode=0700,uid={uid},gid={gid}"
-        ),
-        "--tmpfs",
-        &format!(
-            "/run/kilnr/home:rw,nosuid,nodev,noexec,size=128m,mode=0700,uid={uid},gid={gid}"
         ),
     ]);
     for (key, value) in runtime_helpers::build_public_env(&rt, id, job, &roots)? {
