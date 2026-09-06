@@ -576,12 +576,17 @@ install \
     "$TMP_COMPOSE" \
     "$KILNR_COMPOSE"
 
-install \
-    -o root \
-    -g root \
-    -m 0644 \
-    "$TMP_CADDYFILE" \
-    "$CADDYFILE"
+# The Caddyfile is bind-mounted as a single file. Replacing it changes the
+# inode and can leave the running Caddy container attached to stale contents.
+# Keep the existing inode and validate the live file before reloading Caddy.
+cat "$TMP_CADDYFILE" >"$CADDYFILE"
+
+if ! docker exec "$CADDY_CONTAINER" \
+    caddy validate --config /etc/caddy/Caddyfile >/dev/null
+then
+    cat "$BACKUP_DIR/Caddyfile" >"$CADDYFILE"
+    die "live Caddyfile validation failed; restored previous configuration"
+fi
 
 
 cat >"$WEB_CONFIG" <<EOF
@@ -614,6 +619,11 @@ docker compose \
         up -d \
         "$CADDY_SERVICE"
 )
+
+# Always reload explicitly: Compose may decide that the running Caddy
+# container does not need recreation even though its Caddyfile changed.
+docker exec "$CADDY_CONTAINER" \
+    caddy reload --config /etc/caddy/Caddyfile >/dev/null
 
 
 #
