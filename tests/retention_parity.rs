@@ -300,6 +300,46 @@ fn test_terminal_failures_are_eligible() {
 }
 
 #[test]
+fn test_historical_enqueue_timestamp_skew_is_accepted() {
+    let mut fixture = Fixture::new();
+    let path = fixture.ordinary_build(50);
+    let job: Value =
+        serde_json::from_slice(&fs::read(path.join("job.json")).unwrap()).unwrap();
+    let received = DateTime::parse_from_rfc3339(job["received_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc)
+        + Duration::milliseconds(3);
+    let received = received.to_rfc3339();
+
+    fixture.mutate(&path, "job.json", json!({"received_at": received}));
+    fixture.mutate(&path, "status.json", json!({"received_at": received}));
+
+    let report = fixture.cleanup(None, false);
+    assert_eq!(report.code, 0);
+    assert!(!path.exists());
+}
+
+#[test]
+fn test_excessive_enqueue_timestamp_skew_is_refused() {
+    let mut fixture = Fixture::new();
+    let path = fixture.ordinary_build(50);
+    let job: Value =
+        serde_json::from_slice(&fs::read(path.join("job.json")).unwrap()).unwrap();
+    let received = DateTime::parse_from_rfc3339(job["received_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc)
+        + Duration::seconds(2);
+    let received = received.to_rfc3339();
+
+    fixture.mutate(&path, "job.json", json!({"received_at": received}));
+    fixture.mutate(&path, "status.json", json!({"received_at": received}));
+
+    let report = fixture.cleanup(None, false);
+    assert_eq!(report.code, 1);
+    assert!(path.exists());
+}
+
+#[test]
 fn test_metadata_identity_failures() {
     let mut fixture = Fixture::new();
     let variants = [
