@@ -1191,12 +1191,13 @@ fn enqueue(args: &[String]) -> Result<()> {
     if !valid_oid(&sha) {
         bail!("invalid commit sha")
     }
-    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%6fZ");
+    let received = Utc::now();
+    let timestamp = received.format("%Y%m%dT%H%M%S%6fZ");
     let entropy = SystemTime::now().duration_since(UNIX_EPOCH)?.subsec_nanos() ^ std::process::id();
     let id = format!("{timestamp}-{project}-{}-{entropy:08x}", &sha[..7]);
     let pin = format!("refs/kilnr/jobs/{id}");
     git(&repo, &["update-ref", &pin, &sha])?;
-    let mut job = json!({"schema":1,"id":id,"project":project,"received_at":Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros,true),"old_sha":old,"new_sha":new,"sha":sha,"ref":reference,"type":kind,"event":if kind=="ci"{"push"}else{"tag"},"pin_ref":pin});
+    let mut job = json!({"schema":1,"id":id,"project":project,"received_at":received.to_rfc3339_opts(chrono::SecondsFormat::Micros,true),"old_sha":old,"new_sha":new,"sha":sha,"ref":reference,"type":kind,"event":if kind=="ci"{"push"}else{"tag"},"pin_ref":pin});
     if kind == "ci" {
         job["branch"] = json!(reference.trim_start_matches("refs/heads/"));
     } else {
