@@ -524,7 +524,7 @@ fn config_tool(args: &[String]) -> Result<()> {
             let re = Regex::new(r"(?s)\n?# BEGIN KILNR\n.*?# END KILNR\n?")?;
             let clean = re.replace_all(&text, "\n");
             let block = format!(
-                "# BEGIN KILNR\n{domain} {{\n    {directive} {{\n        {user} {hash}\n    }}\n\n    encode zstd gzip\n\n    reverse_proxy kilnr-web:8088\n}}\n# END KILNR\n"
+                "# BEGIN KILNR\n{domain} {{\n    @health path /healthz\n    handle @health {{\n        reverse_proxy kilnr-web:8088\n    }}\n\n    handle {{\n        {directive} {{\n            {user} {hash}\n        }}\n\n        encode zstd gzip\n        reverse_proxy kilnr-web:8088\n    }}\n}}\n# END KILNR\n"
             );
             fs::write(path, format!("{}\n\n{block}", clean.trim_end()))?;
             Ok(())
