@@ -508,6 +508,10 @@ pub fn execute(args: &[String]) -> Result<()> {
         "/workspace",
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=512m",
+        "--tmpfs",
+        &format!(
+            "/run/kilnr/tmp:rw,nosuid,nodev,noexec,size=512m,mode=0700,uid={uid},gid={gid}"
+        ),
     ]);
     for (key, value) in runtime_helpers::build_public_env(&rt, id, job, &roots)? {
         docker.args(["--env", &format!("{key}={value}")]);
