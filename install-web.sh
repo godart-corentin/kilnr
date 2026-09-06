@@ -35,13 +35,11 @@ command -v docker >/dev/null \
 
 command -v python3 >/dev/null \
     || die "python3 not found"
-
 docker compose version >/dev/null 2>&1 \
     || die "docker compose plugin unavailable"
 
 [[ -f "$WEB_SOURCE/Dockerfile" ]] \
     || die "Kilnr web source is not installed; run install.sh first"
-
 docker inspect "$CADDY_CONTAINER" >/dev/null 2>&1 \
     || die "running Caddy container '$CADDY_CONTAINER' not found"
 
@@ -377,13 +375,19 @@ text = re.sub(
 
 block = f"""# BEGIN KILNR
 {os.environ['DOMAIN']} {{
-    {os.environ['AUTH_DIRECTIVE']} {{
-        {os.environ['AUTH_USER']} {os.environ['CADDY_HASH']}
+    @health path /healthz
+    handle @health {{
+        reverse_proxy kilnr-web:8088
     }}
 
-    encode zstd gzip
+    handle {{
+        {os.environ['AUTH_DIRECTIVE']} {{
+            {os.environ['AUTH_USER']} {os.environ['CADDY_HASH']}
+        }}
 
-    reverse_proxy kilnr-web:8088
+        encode zstd gzip
+        reverse_proxy kilnr-web:8088
+    }}
 }}
 # END KILNR
 """
