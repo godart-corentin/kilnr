@@ -533,7 +533,7 @@ fn test_controller_and_project_locks() {
     let report = fixture.cleanup(None, false);
     assert_eq!(report.code, 0);
     assert!(path.exists() && report.lines[0].contains("controller is active"));
-    controller.unlock().unwrap();
+    fs2::FileExt::unlock(&controller).unwrap();
     let guard = project_lock::ProjectLocks::acquire(
         &fixture.locks,
         &["demo".into()],
@@ -564,7 +564,7 @@ fn test_status_lock_protects_terminal_build() {
     lock.lock_exclusive().unwrap();
     assert_eq!(fixture.cleanup(None, false).code, 1);
     assert!(path.exists());
-    lock.unlock().unwrap();
+    fs2::FileExt::unlock(&lock).unwrap();
     assert_eq!(fixture.cleanup(None, false).code, 0);
     assert!(!path.exists());
 }
