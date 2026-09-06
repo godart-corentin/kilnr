@@ -1,6 +1,21 @@
 use kilnr::project_lock::{self, Mode, ProjectLocks};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+
+fn run_as_submitter(program: &str, args: &[&Path], gid: u32) -> ExitStatus {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if unsafe { libc::geteuid() } == 0 {
+        command.uid(54_001).gid(gid);
+    }
+    command.status().unwrap()
+}
 
 fn provision(root: &std::path::Path, names: &[&str]) {
     fs::set_permissions(root, fs::Permissions::from_mode(0o750)).unwrap();
@@ -166,17 +181,14 @@ fn test_submitter_cannot_unlink_recreate_or_split_a_held_lock_inode() {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o550)).unwrap();
     let _lock =
         ProjectLocks::acquire(root.path(), &["demo".into()], Mode::Exclusive, false).unwrap();
-    let inode = fs::metadata(root.path().join("demo.lock")).unwrap().ino();
-    assert!(fs::remove_file(root.path().join("demo.lock")).is_err());
-    assert!(fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(root.path().join("replacement"))
-        .is_err());
-    assert_eq!(
-        fs::metadata(root.path().join("demo.lock")).unwrap().ino(),
-        inode
-    );
+    let lock_path = root.path().join("demo.lock");
+    let replacement = root.path().join("replacement");
+    let metadata = fs::metadata(&lock_path).unwrap();
+    let inode = metadata.ino();
+    assert!(!run_as_submitter("/bin/rm", &[&lock_path], metadata.gid()).success());
+    assert!(!run_as_submitter("/usr/bin/touch", &[&replacement], metadata.gid()).success());
+    assert_eq!(fs::metadata(lock_path).unwrap().ino(), inode);
+    assert!(!replacement.exists());
 }
 
 fn namespace_policy() -> project_lock::NamespacePolicy {
@@ -205,6 +217,7 @@ fn acl_tools() -> bool {
 #[test]
 fn test_submitter_cannot_replace_project_lock_namespace_through_ancestors() {
     let base = tempfile::tempdir().unwrap();
+    fs::set_permissions(base.path(), fs::Permissions::from_mode(0o755)).unwrap();
     let state = base.path().join("kilnr");
     project_lock::provision_namespace(&state, &namespace_policy()).unwrap();
     let locks = state.join("locks");
@@ -212,8 +225,13 @@ fn test_submitter_cannot_replace_project_lock_namespace_through_ancestors() {
     for path in [&state, &locks, &projects] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o550)).unwrap();
     }
-    assert!(fs::rename(&projects, locks.join("projects-replaced")).is_err());
-    assert!(fs::rename(&locks, state.join("locks-replaced")).is_err());
+    let gid = fs::metadata(&projects).unwrap().gid();
+    let projects_replaced = locks.join("projects-replaced");
+    let locks_replaced = state.join("locks-replaced");
+    assert!(!run_as_submitter("/bin/mv", &[&projects, &projects_replaced], gid).success());
+    assert!(!run_as_submitter("/bin/mv", &[&locks, &locks_replaced], gid).success());
+    assert!(projects.is_dir());
+    assert!(locks.is_dir());
 }
 
 #[test]
