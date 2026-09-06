@@ -22,7 +22,6 @@ check() {
 
 for command in \
     git \
-    python3 \
     make \
     docker \
     setfacl \

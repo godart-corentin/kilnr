@@ -29,14 +29,11 @@ CADDYFILE="$(
 )"
 
 if [[ -n "$CADDYFILE" && -f "$CADDYFILE" ]]; then
-    python3 - "$CADDYFILE" <<'PY'
-import re, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-text = re.sub(r"\n?# BEGIN KILNR\n.*?# END KILNR\n?", "\n", text, flags=re.DOTALL)
-path.write_text(text.rstrip() + "\n", encoding="utf-8")
-PY
+    if [[ -x /usr/local/libexec/kilnr/config-tool ]]; then
+        /usr/local/libexec/kilnr/config-tool strip-caddy "$CADDYFILE"
+    else
+        sed -i '/# BEGIN KILNR/,/# END KILNR/d' "$CADDYFILE"
+    fi
 fi
 
 if [[ -n "$CADDY_WORKDIR" ]]; then

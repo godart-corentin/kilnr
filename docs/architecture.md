@@ -138,8 +138,8 @@ Pipeline steps with `"when": "release"` are excluded entirely from normal CI run
 
 ## Completed-build retention
 
-The administrator cleanup helper and daily systemd timer share
-`kilnr_retention.py`. Cleanup holds the controller lock, then an exclusive
+The Rust administrator cleanup command and daily systemd timer share the same
+retention implementation. Cleanup holds the controller lock, then an exclusive
 project lock, validates terminal build identities, and retires selected builds
 through durable `.cleanup-<id>` transactions under the builds root. Rerun holds
 a shared project lock through enqueue. Git pins remain preparation-scoped;

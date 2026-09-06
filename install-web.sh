@@ -33,8 +33,6 @@ AUTH_USER="${KILNR_WEB_USER:-kilnr}"
 command -v docker >/dev/null \
     || die "docker not found"
 
-command -v python3 >/dev/null \
-    || die "python3 not found"
 docker compose version >/dev/null 2>&1 \
     || die "docker compose plugin unavailable"
 
@@ -274,9 +272,8 @@ services:
     healthcheck:
       test:
         - CMD
-        - python3
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=2).read()"
+        - /opt/kilnr/web
+        - --healthcheck
 
       interval: 30s
       timeout: 5s
@@ -348,57 +345,7 @@ write_caddy_block() {
     AUTH_USER="$AUTH_USER" \
     CADDY_HASH="$CADDY_HASH" \
     AUTH_DIRECTIVE="$directive" \
-    CADDYFILE="$TMP_CADDYFILE" \
-    python3 <<'PY'
-import os
-import re
-from pathlib import Path
-
-path = Path(
-    os.environ["CADDYFILE"]
-)
-
-text = path.read_text(
-    encoding="utf-8"
-)
-
-#
-# Kilnr owns only the marked section.
-#
-
-text = re.sub(
-    r"\n?# BEGIN KILNR\n.*?# END KILNR\n?",
-    "\n",
-    text,
-    flags=re.DOTALL,
-)
-
-block = f"""# BEGIN KILNR
-{os.environ['DOMAIN']} {{
-    @health path /healthz
-    handle @health {{
-        reverse_proxy kilnr-web:8088
-    }}
-
-    handle {{
-        {os.environ['AUTH_DIRECTIVE']} {{
-            {os.environ['AUTH_USER']} {os.environ['CADDY_HASH']}
-        }}
-
-        encode zstd gzip
-        reverse_proxy kilnr-web:8088
-    }}
-}}
-# END KILNR
-"""
-
-path.write_text(
-    text.rstrip()
-    + "\n\n"
-    + block,
-    encoding="utf-8",
-)
-PY
+    /usr/local/libexec/kilnr/config-tool write-caddy "$TMP_CADDYFILE"
 }
 
 
@@ -482,45 +429,8 @@ docker compose \
 
 
 MERGED_CADDY_NETWORKS="$(
-    CADDY_SERVICE="$CADDY_SERVICE" \
-    python3 - "$MERGED_COMPOSE_JSON" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-
-with path.open(
-    "r",
-    encoding="utf-8",
-) as f:
-    data = json.load(f)
-
-service = os.environ["CADDY_SERVICE"]
-
-try:
-    networks = data["services"][service]["networks"]
-except (KeyError, TypeError):
-    raise SystemExit(
-        "cannot determine merged Caddy networks"
-    )
-
-if isinstance(networks, dict):
-    names = networks.keys()
-elif isinstance(networks, list):
-    names = networks
-else:
-    raise SystemExit(
-        "invalid merged Caddy networks"
-    )
-
-print(
-    "\n".join(
-        sorted(names)
-    )
-)
-PY
+    /usr/local/libexec/kilnr/config-tool compose-networks \
+        "$MERGED_COMPOSE_JSON" "$CADDY_SERVICE"
 )"
 
 

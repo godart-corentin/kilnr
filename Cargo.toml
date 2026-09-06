@@ -1,0 +1,26 @@
+[package]
+name = "kilnr"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+fs2 = "0.4"
+glob = "0.3"
+libc = "0.2"
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tar = { version = "0.4.46", default-features = false }
+tempfile = "3.20"
+tiny_http = "0.12"
+ureq = { version = "3.0", default-features = false, features = ["rustls"] }
+rpassword = "7.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

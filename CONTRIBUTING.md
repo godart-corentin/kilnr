@@ -16,7 +16,7 @@ The supported targets are Ubuntu 24.04 LTS and Ubuntu 26.04 LTS.
 
 Kilnr currently relies on:
 
-- Python 3 standard library;
+- Rust 1.85 or newer;
 - Bash;
 - Git;
 - GNU Make;
@@ -31,7 +31,8 @@ Avoid adding runtime dependencies unless there is a clear benefit.
 
 Run:
 
-    ./tests/run.sh
+    cargo test --all-targets
+    cargo clippy --all-targets -- -D warnings
 
 Frontend behavior tests and the production build (after installing its npm dependencies):
 
@@ -46,7 +47,7 @@ Before submitting a change, also verify:
     bash -n install-web.sh
     bash -n uninstall-web.sh
 
-Python scripts should pass the static checks included in the test suite.
+Rust code must pass `cargo fmt --check` and Clippy without warnings.
 
 ## Security-Sensitive Changes
 

@@ -7,32 +7,11 @@ ROOT_DIR="$(
     && pwd
 )"
 
-for test in \
-    test_static.py \
-    test_retention.py \
-    test_platform.py \
-    test_uninstall.py \
-    test_install_web.py \
-    test_web_api.py \
-    test_web_http.py \
-    test_frontend.py \
-    test_pipeline.py \
-    test_cache.py \
-    test_artifacts.py \
-    test_secrets.py \
-    test_project_lock.py \
-    test_project_lifecycle_locks.py \
-    test_project_rename.py \
-    test_permissions.py \
-    test_import_shadowing.py \
-    test_branch_pipelines.py \
-    test_controller_dag.py \
-    test_execute_modes.py \
-    test_job_status_consumers.py \
-    test_enqueue_atomic_publish.py
-do
-    python3 "$ROOT_DIR/tests/$test"
-done
+cargo test --manifest-path "$ROOT_DIR/Cargo.toml" --all-targets --locked
+cargo clippy --manifest-path "$ROOT_DIR/Cargo.toml" --all-targets --locked -- -D warnings
+cargo fmt --manifest-path "$ROOT_DIR/Cargo.toml" --check
+npm --prefix "$ROOT_DIR/web/frontend" test
+npm --prefix "$ROOT_DIR/web/frontend" run build
 
 for unit in \
     "$ROOT_DIR/systemd/kilnr-controller.service" \

@@ -105,10 +105,9 @@ Before retiring a build, cleanup requires:
   crossings in payloads.
 
 Only direct children of the fixed `/var/lib/kilnr/builds` directory can be
-retired. No CLI/environment override changes that root. Test code injects
-isolated roots directly into the Python function. Recursive removal uses open
-directory descriptors and never follows payload symlinks: it unlinks those
-links themselves. Repository-provided path fields are not deletion targets.
+retired. No CLI/environment override changes that root. Recursive removal does
+not follow payload symlinks: it unlinks those links themselves.
+Repository-provided path fields are not deletion targets.
 Administrative processes that bypass Kilnr locks or change mounts/ownership
 while cleanup runs are outside the supported concurrency model.
 

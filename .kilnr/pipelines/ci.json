@@ -6,13 +6,26 @@
       "*"
     ]
   },
-  "max_parallel": 1,
+  "max_parallel": 2,
   "jobs": {
-    "tests": {
-      "image": "python:3.12-bookworm",
-      "network": "none",
+    "rust": {
+      "image": "rust:1.85.1-bookworm",
+      "network": "kilnr-ci",
       "run": [
-        "./tests/run.sh"
+        "rustup component add clippy rustfmt",
+        "cargo test --all-targets --locked",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo fmt --all -- --check",
+        "for unit in systemd/kilnr-controller.service systemd/kilnr-queue.path systemd/kilnr-network.service; do grep -q '^\\[Unit\\]$' \"$unit\"; done"
+      ]
+    },
+    "frontend": {
+      "image": "node:22-bookworm",
+      "network": "kilnr-ci",
+      "run": [
+        "npm --prefix web/frontend ci --no-audit --no-fund",
+        "npm --prefix web/frontend test",
+        "npm --prefix web/frontend run build"
       ]
     }
   }
