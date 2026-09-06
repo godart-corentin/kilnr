@@ -2,7 +2,8 @@ use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,24 +59,56 @@ fn test_web_http_json_api_spa_fallback_and_terminal_sse_streams() {
         serde_json::to_vec(&status).unwrap(),
     )
     .unwrap();
+    for path in [
+        root.path(),
+        &builds,
+        &static_root,
+        &build,
+        &build.join("logs"),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for path in [
+        static_root.join("index.html"),
+        build.join("status.json"),
+        build.join("logs/tests.log"),
+        build.join("logs/pipeline.log"),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let helper = root.path().join("web");
-    symlink(env!("CARGO_BIN_EXE_kilnr"), &helper).unwrap();
-    let child = Command::new(helper)
+    fs::copy(env!("CARGO_BIN_EXE_kilnr"), &helper).unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::new(helper);
+    command
         .env("KILNR_WEB_BUILDS", &builds)
         .env("KILNR_WEB_STATIC", &static_root)
         .env("KILNR_WEB_HOST", "127.0.0.1")
         .env("KILNR_WEB_PORT", port.to_string())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let _server = Server(child);
+        .stderr(Stdio::piped());
+    if unsafe { libc::geteuid() } == 0 {
+        command.uid(54_001).gid(54_001);
+    }
+    let child = command.spawn().unwrap();
+    let mut server = Server(child);
     let deadline = Instant::now() + Duration::from_secs(3);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            let mut error = String::new();
+            server
+                .0
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut error)
+                .unwrap();
+            panic!("web server exited with {status}: {error}");
+        }
         assert!(Instant::now() < deadline, "web server did not start");
         thread::sleep(Duration::from_millis(20));
     }
