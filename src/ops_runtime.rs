@@ -1,4 +1,4 @@
-use crate::{artifacts, atomic, pipeline, runtime as runtime_helpers};
+use crate::{artifacts, atomic, pipeline, retention, runtime as runtime_helpers};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
@@ -392,35 +392,15 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub fn execute(args: &[String]) -> Result<()> {
-    if args.len() != 2 {
-        bail!("usage: execute <build-id> <job-id>")
-    }
-    let (build_id, id) = (&args[0], &args[1]);
-    if !Regex::new(r"^[A-Za-z0-9_.-]+$").unwrap().is_match(build_id)
-        || !Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$")
-            .unwrap()
-            .is_match(id)
-    {
-        bail!("invalid build/job id")
-    }
-    let dir = Path::new(BUILDS).join(build_id);
-    let rt = read(&dir.join("runtime.json"))?;
-    if rt["build_id"] != *build_id {
-        bail!("runtime build id mismatch")
-    }
-    let job = &rt["jobs"][id];
-    if job.is_null() {
-        bail!("unknown job")
-    };
-    let started = now();
-    runtime_helpers::update_job(
-        &dir,
-        id,
-        &json!({"state":"running","started_at":started,"finished_at":null,"duration_seconds":null,"exit_code":null}),
-    )?;
-    let work = dir.join("work").join(id);
-    copy_tree(&dir.join("src"), &work)?;
+fn run_job(
+    dir: &Path,
+    work: &Path,
+    build_id: &str,
+    id: &str,
+    rt: &Value,
+    job: &Value,
+) -> Result<i32> {
+    copy_tree(&dir.join("src"), work)?;
     let log_path = dir.join("logs").join(format!("{id}.log"));
     let mut log = File::create(&log_path)?;
     writeln!(
@@ -429,7 +409,7 @@ pub fn execute(args: &[String]) -> Result<()> {
         job["image"], job["network"]
     )?;
     let mut mounts = vec![format!("type=bind,src={},dst=/workspace", work.display())];
-    let (execution_mounts, mut argv) = runtime_helpers::prepare_execution(&dir, id, job)?;
+    let (execution_mounts, mut argv) = runtime_helpers::prepare_execution(dir, id, job)?;
     mounts.extend(execution_mounts);
     let inputs = job["resolved_inputs"]
         .as_array()
@@ -438,17 +418,16 @@ pub fn execute(args: &[String]) -> Result<()> {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let roots = artifacts::input_roots(&dir, &inputs)?;
+    let roots = artifacts::input_roots(dir, &inputs)?;
     mounts.extend(runtime_helpers::build_input_mounts(&roots));
     if let Some(tools) = job["tools"].as_object() {
-        let (tool_mounts, wrapped) =
-            runtime_helpers::prepare_tools_wrapper(&dir, id, tools, &argv)?;
+        let (tool_mounts, wrapped) = runtime_helpers::prepare_tools_wrapper(dir, id, tools, &argv)?;
         mounts.extend(tool_mounts);
         argv = wrapped;
     }
     mounts.extend(runtime_helpers::prepare_cache_mounts(
         Path::new("/var/lib/kilnr/cache"),
-        &rt,
+        rt,
         job,
     )?);
     let secret_stage = runtime_helpers::prepare_secret_stage(
@@ -456,7 +435,7 @@ pub fn execute(args: &[String]) -> Result<()> {
         Path::new("/var/lib/kilnr/secret-staging"),
         build_id,
         id,
-        &rt,
+        rt,
         job,
     )?;
     if let Some(stage) = secret_stage.path.as_ref() {
@@ -517,11 +496,9 @@ pub fn execute(args: &[String]) -> Result<()> {
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=512m",
         "--tmpfs",
-        &format!(
-            "/run/kilnr/tmp:rw,nosuid,nodev,exec,size=512m,mode=0700,uid={uid},gid={gid}"
-        ),
+        &format!("/run/kilnr/tmp:rw,nosuid,nodev,exec,size=512m,mode=0700,uid={uid},gid={gid}"),
     ]);
-    for (key, value) in runtime_helpers::build_public_env(&rt, id, job, &roots)? {
+    for (key, value) in runtime_helpers::build_public_env(rt, id, job, &roots)? {
         docker.args(["--env", &format!("{key}={value}")]);
     }
     for m in mounts {
@@ -535,9 +512,25 @@ pub fn execute(args: &[String]) -> Result<()> {
     let mut child = docker.spawn()?;
     let timeout = Duration::from_secs(rt["runner"]["timeout_seconds"].as_u64().unwrap());
     let clock = Instant::now();
+    let mut polling_error = None;
     let rc = loop {
-        if let Some(status) = child.try_wait()? {
-            break status.code().unwrap_or(1);
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(1),
+            Ok(None) => {}
+            Err(error) => {
+                polling_error = Some(error);
+                let _ = Command::new("/usr/bin/docker")
+                    .args([
+                        "rm",
+                        "-f",
+                        &format!(
+                            "kilnr-{}-{id}",
+                            &build_id[build_id.len().saturating_sub(32)..]
+                        ),
+                    ])
+                    .status();
+                break 1;
+            }
         }
         if clock.elapsed() > timeout {
             let _ = Command::new("/usr/bin/docker")
@@ -562,17 +555,166 @@ pub fn execute(args: &[String]) -> Result<()> {
     )
     .into_bytes();
     log.write_all(&bytes)?;
-    let collected = if rc == 0 {
-        runtime_helpers::collect_job_artifacts(&dir, &work, id, job)?
+    if let Some(error) = polling_error {
+        return Err(error).context("failed while waiting for Docker job");
+    }
+    Ok(rc)
+}
+
+fn with_secondary_errors(
+    error: anyhow::Error,
+    status_error: Option<anyhow::Error>,
+    cleanup_error: Option<&anyhow::Error>,
+) -> anyhow::Error {
+    let mut details = vec![];
+    if let Some(status_error) = status_error {
+        details.push(format!("job status update also failed: {status_error:#}"));
+    }
+    if let Some(cleanup_error) = cleanup_error {
+        details.push(format!("workspace cleanup also failed: {cleanup_error:#}"));
+    }
+    if details.is_empty() {
+        error
+    } else {
+        error.context(details.join("; "))
+    }
+}
+
+/// Persist the terminal job result, then remove its ephemeral workspace.
+/// Execution or artifact errors remain primary if status/cleanup also fails.
+/// A status or execution-log write failure retains the workspace. A cleanup
+/// failure is recorded in the job log/status; it fails an otherwise successful
+/// job but never replaces an existing job failure or exit code.
+pub fn complete_job(
+    dir: &Path,
+    id: &str,
+    job: &Value,
+    started: &str,
+    execution: Result<i32>,
+) -> Result<i32> {
+    if !Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+        .unwrap()
+        .is_match(id)
+    {
+        bail!("invalid job id");
+    }
+    let work = dir.join("work").join(id);
+    let (rc, mut primary_error) = match execution {
+        Ok(rc) => (rc, None),
+        Err(error) => (1, Some(error)),
+    };
+    let execution_log_error = primary_error.as_ref().and_then(|error| {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o640)
+            .open(dir.join("logs").join(format!("{id}.log")))
+            .and_then(|mut log| writeln!(log, "\nkilnr: job execution failed: {error:#}"))
+            .err()
+    });
+    let collected = if rc == 0 && primary_error.is_none() {
+        match runtime_helpers::collect_job_artifacts(dir, &work, id, job) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                primary_error = Some(error);
+                vec![]
+            }
+        }
     } else {
         vec![]
     };
     let finished = now();
+    let status_error = runtime_helpers::update_job(
+        dir,
+        id,
+        &json!({
+            "state": if rc == 0 && primary_error.is_none() { "success" } else { "failed" },
+            "exit_code": if primary_error.is_some() && rc == 0 { 1 } else { rc },
+            "finished_at": finished,
+            "duration_seconds": elapsed(started),
+            "artifacts": collected,
+            "error": primary_error.as_ref().map(|error| format!("{error:#}")),
+        }),
+    )
+    .err();
+
+    if let Some(error) = status_error {
+        return if let Some(primary) = primary_error {
+            let primary = if let Some(log_error) = execution_log_error {
+                primary.context(format!("job log write also failed: {log_error}"))
+            } else {
+                primary
+            };
+            Err(with_secondary_errors(primary, Some(error), None))
+        } else {
+            Err(error)
+        };
+    }
+    if let Some(error) = execution_log_error {
+        return if let Some(primary) = primary_error {
+            Err(primary.context(format!("job log write also failed: {error}")))
+        } else {
+            Err(error.into())
+        };
+    }
+
+    let cleanup_error = retention::remove_job_workspace(&dir.join("work"), id).err();
+    if let Some(error) = cleanup_error.as_ref() {
+        let message = format!("workspace cleanup failed: {error:#}");
+        eprintln!("kilnr execute: {message}");
+        let _ = OpenOptions::new()
+            .append(true)
+            .open(dir.join("logs").join(format!("{id}.log")))
+            .and_then(|mut log| writeln!(log, "\nkilnr: {message}"));
+        let _ = runtime_helpers::update_job(
+            dir,
+            id,
+            &json!({"workspace_cleanup":{"state":"failed","error":message}}),
+        );
+    }
+
+    if let Some(error) = primary_error {
+        return Err(with_secondary_errors(error, None, cleanup_error.as_ref()));
+    }
+    if let Some(error) = cleanup_error {
+        if rc != 0 {
+            return Ok(rc);
+        }
+        return Err(error);
+    }
+    Ok(rc)
+}
+
+pub fn execute(args: &[String]) -> Result<()> {
+    if args.len() != 2 {
+        bail!("usage: execute <build-id> <job-id>")
+    }
+    let (build_id, id) = (&args[0], &args[1]);
+    if !Regex::new(r"^[A-Za-z0-9_.-]+$").unwrap().is_match(build_id)
+        || !Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+            .unwrap()
+            .is_match(id)
+    {
+        bail!("invalid build/job id")
+    }
+    let dir = Path::new(BUILDS).join(build_id);
+    let rt = read(&dir.join("runtime.json"))?;
+    if rt["build_id"] != *build_id {
+        bail!("runtime build id mismatch")
+    }
+    let job = &rt["jobs"][id];
+    if job.is_null() {
+        bail!("unknown job")
+    };
+    let started = now();
     runtime_helpers::update_job(
         &dir,
         id,
-        &json!({"state":if rc==0{"success"}else{"failed"},"exit_code":rc,"finished_at":finished,"duration_seconds":elapsed(&started),"artifacts":collected}),
+        &json!({"state":"running","started_at":started,"finished_at":null,"duration_seconds":null,"exit_code":null}),
     )?;
+    let work = dir.join("work").join(id);
+    let execution = run_job(&dir, &work, build_id, id, &rt, job);
+    let rc = complete_job(&dir, id, job, &started, execution)?;
     if rc != 0 {
         std::process::exit(rc)
     }

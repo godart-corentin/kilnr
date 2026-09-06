@@ -107,10 +107,9 @@ pub fn validate_build(
         }
     }
     let received = timestamp(job.get("received_at"))?;
-    let id_received =
-        chrono::NaiveDateTime::parse_from_str(&captures[1], "%Y%m%dT%H%M%S%6fZ")
-            .context("invalid build id timestamp")?
-            .and_utc();
+    let id_received = chrono::NaiveDateTime::parse_from_str(&captures[1], "%Y%m%dT%H%M%S%6fZ")
+        .context("invalid build id timestamp")?
+        .and_utc();
     let received_skew = received.signed_duration_since(id_received);
     if received_skew < chrono::Duration::zero()
         || received_skew > chrono::Duration::seconds(1)
@@ -369,6 +368,29 @@ fn remove_tree(path: &Path, device: u64) -> Result<()> {
     } else {
         fs::remove_file(path)?;
     }
+    Ok(())
+}
+
+/// Remove one ephemeral job workspace without following symlinks or crossing a
+/// filesystem boundary. The complete tree is checked before removal so an
+/// unsafe entry leaves the workspace available for diagnosis.
+pub fn remove_job_workspace(work_root: &Path, job_id: &str) -> Result<()> {
+    if !Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+        .unwrap()
+        .is_match(job_id)
+    {
+        bail!("invalid job workspace id");
+    }
+    let root = safe_dir(work_root)?;
+    let workspace = work_root.join(job_id);
+    match fs::symlink_metadata(&workspace) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    tree_check(&workspace, root.dev())?;
+    remove_tree(&workspace, root.dev())?;
+    File::open(work_root)?.sync_all()?;
     Ok(())
 }
 

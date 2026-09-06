@@ -303,8 +303,7 @@ fn test_terminal_failures_are_eligible() {
 fn test_historical_enqueue_timestamp_skew_is_accepted() {
     let mut fixture = Fixture::new();
     let path = fixture.ordinary_build(50);
-    let job: Value =
-        serde_json::from_slice(&fs::read(path.join("job.json")).unwrap()).unwrap();
+    let job: Value = serde_json::from_slice(&fs::read(path.join("job.json")).unwrap()).unwrap();
     let received = DateTime::parse_from_rfc3339(job["received_at"].as_str().unwrap())
         .unwrap()
         .with_timezone(&Utc)
@@ -323,8 +322,7 @@ fn test_historical_enqueue_timestamp_skew_is_accepted() {
 fn test_excessive_enqueue_timestamp_skew_is_refused() {
     let mut fixture = Fixture::new();
     let path = fixture.ordinary_build(50);
-    let job: Value =
-        serde_json::from_slice(&fs::read(path.join("job.json")).unwrap()).unwrap();
+    let job: Value = serde_json::from_slice(&fs::read(path.join("job.json")).unwrap()).unwrap();
     let received = DateTime::parse_from_rfc3339(job["received_at"].as_str().unwrap())
         .unwrap()
         .with_timezone(&Utc)
