@@ -564,15 +564,13 @@ fn run_job(
 fn with_secondary_errors(
     error: anyhow::Error,
     status_error: Option<anyhow::Error>,
-    cleanup_error: Option<&anyhow::Error>,
+    cleanup_errors: &[String],
 ) -> anyhow::Error {
     let mut details = vec![];
     if let Some(status_error) = status_error {
         details.push(format!("job status update also failed: {status_error:#}"));
     }
-    if let Some(cleanup_error) = cleanup_error {
-        details.push(format!("workspace cleanup also failed: {cleanup_error:#}"));
-    }
+    details.extend(cleanup_errors.iter().cloned());
     if details.is_empty() {
         error
     } else {
@@ -580,11 +578,12 @@ fn with_secondary_errors(
     }
 }
 
-/// Persist the terminal job result, then remove its ephemeral workspace.
+/// Persist the terminal job result, then remove its ephemeral work and runtime
+/// subtrees.
 /// Execution or artifact errors remain primary if status/cleanup also fails.
-/// A status or execution-log write failure retains the workspace. A cleanup
-/// failure is recorded in the job log/status; it fails an otherwise successful
-/// job but never replaces an existing job failure or exit code.
+/// A status or execution-log write failure retains both subtrees. Cleanup
+/// failures are recorded in the job log/status; they fail an otherwise
+/// successful job but never replace an existing job failure or exit code.
 pub fn complete_job(
     dir: &Path,
     id: &str,
@@ -645,7 +644,7 @@ pub fn complete_job(
             } else {
                 primary
             };
-            Err(with_secondary_errors(primary, Some(error), None))
+            Err(with_secondary_errors(primary, Some(error), &[]))
         } else {
             Err(error)
         };
@@ -658,25 +657,40 @@ pub fn complete_job(
         };
     }
 
-    let cleanup_error = retention::remove_job_workspace(&dir.join("work"), id).err();
-    if let Some(error) = cleanup_error.as_ref() {
-        let message = format!("workspace cleanup failed: {error:#}");
+    let cleanup_makes_job_fail = primary_error.is_none() && rc == 0;
+    let mut cleanup_errors = vec![];
+    for (name, root) in [("workspace", "work"), ("runtime", "runtime")] {
+        let Some(error) = retention::remove_job_subtree(&dir.join(root), id).err() else {
+            continue;
+        };
+        let message = format!("{name} cleanup failed: {error:#}");
         eprintln!("kilnr execute: {message}");
         let _ = OpenOptions::new()
             .append(true)
             .open(dir.join("logs").join(format!("{id}.log")))
             .and_then(|mut log| writeln!(log, "\nkilnr: {message}"));
-        let _ = runtime_helpers::update_job(
-            dir,
-            id,
-            &json!({"workspace_cleanup":{"state":"failed","error":message}}),
-        );
+        let cleanup_status = if cleanup_makes_job_fail {
+            json!({
+                "state": "failed",
+                "exit_code": 1,
+                "error": message,
+                format!("{name}_cleanup"): {"state":"failed","error":message},
+            })
+        } else {
+            json!({format!("{name}_cleanup"):{"state":"failed","error":message}})
+        };
+        let _ = runtime_helpers::update_job(dir, id, &cleanup_status);
+        cleanup_errors.push((message, error));
     }
 
     if let Some(error) = primary_error {
-        return Err(with_secondary_errors(error, None, cleanup_error.as_ref()));
+        let details = cleanup_errors
+            .iter()
+            .map(|(message, _)| message.clone())
+            .collect::<Vec<_>>();
+        return Err(with_secondary_errors(error, None, &details));
     }
-    if let Some(error) = cleanup_error {
+    if let Some((_, error)) = cleanup_errors.into_iter().next() {
         if rc != 0 {
             return Ok(rc);
         }

@@ -371,27 +371,32 @@ fn remove_tree(path: &Path, device: u64) -> Result<()> {
     Ok(())
 }
 
-/// Remove one ephemeral job workspace without following symlinks or crossing a
-/// filesystem boundary. The complete tree is checked before removal so an
-/// unsafe entry leaves the workspace available for diagnosis.
-pub fn remove_job_workspace(work_root: &Path, job_id: &str) -> Result<()> {
+/// Remove one ephemeral job subtree below a controlled root without following
+/// symlinks or crossing a filesystem boundary. The complete tree is checked
+/// before removal so an unsafe entry leaves the subtree available for
+/// diagnosis.
+pub fn remove_job_subtree(root: &Path, job_id: &str) -> Result<()> {
     if !Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$")
         .unwrap()
         .is_match(job_id)
     {
-        bail!("invalid job workspace id");
+        bail!("invalid job subtree id");
     }
-    let root = safe_dir(work_root)?;
-    let workspace = work_root.join(job_id);
-    match fs::symlink_metadata(&workspace) {
+    let root_metadata = safe_dir(root)?;
+    let subtree = root.join(job_id);
+    match fs::symlink_metadata(&subtree) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     }
-    tree_check(&workspace, root.dev())?;
-    remove_tree(&workspace, root.dev())?;
-    File::open(work_root)?.sync_all()?;
+    tree_check(&subtree, root_metadata.dev())?;
+    remove_tree(&subtree, root_metadata.dev())?;
+    File::open(root)?.sync_all()?;
     Ok(())
+}
+
+pub fn remove_job_workspace(work_root: &Path, job_id: &str) -> Result<()> {
+    remove_job_subtree(work_root, job_id)
 }
 
 fn pin_cleanup(roots: &Roots, project: &str, record: &BuildRecord, dry_run: bool) -> Result<()> {
@@ -718,4 +723,23 @@ fn entry_name(path: &Path) -> Result<String> {
         .and_then(|name| name.to_str())
         .map(str::to_owned)
         .context("invalid directory entry name")
+}
+
+#[cfg(test)]
+mod job_subtree_tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_boundary_is_rejected_before_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let subtree = root.path().join("job");
+        fs::create_dir(&subtree).unwrap();
+        fs::write(subtree.join("keep"), "diagnostic").unwrap();
+        let device = fs::symlink_metadata(root.path()).unwrap().dev();
+
+        let error = tree_check(&subtree, device.wrapping_add(1)).unwrap_err();
+
+        assert!(format!("{error:#}").contains("refusing filesystem boundary"));
+        assert!(subtree.join("keep").is_file());
+    }
 }
