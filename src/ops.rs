@@ -428,6 +428,10 @@ fn project_create(args: &[String]) -> Result<()> {
     }
     fs::create_dir(&repo)?;
     let result = (|| -> Result<()> {
+        let git_uid = project_lock::numeric_identity("id", &["-u", "git"])?;
+        let git_gid = project_lock::numeric_identity("id", &["-g", "git"])?;
+        crate::permissions::set_directory_owner(&repo, git_uid, git_gid)?;
+
         let status = Command::new("/usr/sbin/runuser")
             .args([
                 "-u",

@@ -337,7 +337,7 @@ pub fn provision_namespace(state: &Path, policy: &NamespacePolicy) -> Result<()>
     Ok(())
 }
 
-fn numeric_identity(program: &str, args: &[&str]) -> Result<u32> {
+pub(crate) fn numeric_identity(program: &str, args: &[&str]) -> Result<u32> {
     let output = std::process::Command::new(program).args(args).output()?;
     if !output.status.success() {
         bail!(

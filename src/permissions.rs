@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
-use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::fs::{self, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 
@@ -18,6 +19,33 @@ fn safe_directory(path: &Path) -> Result<()> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         bail!("unsafe managed directory: {}", path.display());
     }
+    Ok(())
+}
+
+pub fn set_directory_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("cannot open managed directory: {}", path.display()))?;
+    if !directory.metadata()?.is_dir() {
+        bail!("managed path is not a directory: {}", path.display())
+    }
+
+    let result = unsafe { libc::fchown(directory.as_raw_fd(), uid, gid) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot assign managed directory: {}", path.display()));
+    }
+
+    let metadata = directory.metadata()?;
+    if (metadata.uid(), metadata.gid()) != (uid, gid) {
+        bail!(
+            "managed directory owner mismatch after assignment: {}",
+            path.display()
+        )
+    }
+    directory.sync_all()?;
     Ok(())
 }
 

@@ -112,6 +112,15 @@ fn test_create_cli_dispatches_through_project_lock_wrapper() {
     assert!(body.contains("format!(\"{LIBEXEC}/project-create\")"));
 }
 
+#[test]
+fn test_project_create_assigns_repository_to_git_before_initialization() {
+    let source = source();
+    let body = function(&source, "fn project_create(", "fn config_tool(");
+
+    assert!(body.contains("permissions::set_directory_owner"));
+    assert_order(body, "permissions::set_directory_owner", "runuser");
+}
+
 fn receive_identity(rollback: bool) {
     let root = tempfile::tempdir().unwrap();
     let git = root.path().join("git");

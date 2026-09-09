@@ -1,7 +1,37 @@
 use kilnr::permissions;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::process::Command;
+
+#[test]
+fn test_directory_owner_assignment_uses_the_opened_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("repository.git");
+    fs::create_dir(&directory).unwrap();
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+
+    permissions::set_directory_owner(&directory, uid, gid).unwrap();
+
+    let metadata = fs::symlink_metadata(directory).unwrap();
+    assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
+}
+
+#[test]
+fn test_directory_owner_assignment_rejects_a_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("repository.git");
+    fs::create_dir(&directory).unwrap();
+    let alias = root.path().join("alias.git");
+    symlink(&directory, &alias).unwrap();
+
+    let result = permissions::set_directory_owner(&alias, unsafe { libc::geteuid() }, unsafe {
+        libc::getegid()
+    });
+
+    assert!(result.is_err());
+    assert!(directory.is_dir());
+}
 
 #[test]
 fn test_normalize_build_metadata_repairs_only_managed_files() {
