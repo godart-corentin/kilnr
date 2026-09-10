@@ -1,6 +1,6 @@
 use kilnr::secrets;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Command, Stdio};
 
 #[test]
@@ -28,6 +28,19 @@ fn test_store_list_load_and_delete_secret() {
             .mode()
             & 0o777,
         0o640
+    );
+    let project_gid = fs::metadata(root.path().join("demo")).unwrap().gid();
+    assert_eq!(
+        fs::metadata(root.path().join("demo/APPLE_ID.value"))
+            .unwrap()
+            .gid(),
+        project_gid
+    );
+    assert_eq!(
+        fs::metadata(root.path().join("demo/APPLE_ID.json"))
+            .unwrap()
+            .gid(),
+        project_gid
     );
     secrets::delete(root.path(), "demo", "APPLE_ID").unwrap();
     assert!(secrets::list(root.path(), "demo").unwrap().is_empty());
@@ -115,7 +128,7 @@ fn test_install_and_project_lifecycle_wire_secret_storage() {
     ] {
         assert!(install.contains(name));
     }
-    assert!(ops.contains("fs::create_dir(&secret_dir)"));
+    assert!(ops.contains("create_owned_directory(&secret_dir, 0, kilnr_gid, 0o750)"));
     assert!(ops.contains("fs::remove_dir_all(&secret_dir)"));
     assert!(uninstall.contains("rm -rf /var/lib/kilnr/secret-staging"));
 }

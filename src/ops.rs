@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -100,6 +101,25 @@ fn root_only() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!("must run as root")
     }
+    Ok(())
+}
+
+fn account_identity(name: &str) -> Result<(u32, u32)> {
+    let numeric = |flag| -> Result<u32> {
+        let output = Command::new("/usr/bin/id").args([flag, name]).output()?;
+        if !output.status.success() {
+            bail!("required system account is missing: {name}")
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().parse()?)
+    };
+    Ok((numeric("-u")?, numeric("-g")?))
+}
+
+fn create_owned_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    crate::permissions::set_directory_owner(path, uid, gid)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    File::open(path)?.sync_all()?;
     Ok(())
 }
 fn privileged(helper: &str, args: &[String], input: Option<&[u8]>) -> Result<()> {
@@ -401,7 +421,7 @@ pub fn helper(name: &str, args: &[String]) -> Result<()> {
         "project-rename" => project_rename(args),
         "rerun" => rerun(args),
         "git-key-add" => git_key_add(),
-        "cleanup" => cleanup(args),
+        "cleanup" => cleanup_entry(args),
         "notify-discord" => notify(args),
         "controller" => crate::ops_runtime::controller(),
         "execute" => crate::ops_runtime::execute(args),
@@ -421,22 +441,25 @@ fn project_create(args: &[String]) -> Result<()> {
     let config_path = Path::new(CONFIG).join(format!("{project}.json"));
     let webhook = Path::new(SECRET_ROOT).join(format!("{project}.discord-webhook"));
     let secret_dir = Path::new(SECRET_ROOT).join(project);
+    let (git_uid, git_gid) = account_identity("git")?;
+    let (kilnr_uid, kilnr_gid) = account_identity("kilnr")?;
     for path in [&repo, &config_path, &webhook, &secret_dir] {
         if path.exists() {
             bail!("destination already exists: {}", path.display())
         }
     }
-    fs::create_dir(&repo)?;
     let result = (|| -> Result<()> {
-        let git_uid = project_lock::numeric_identity("id", &["-u", "git"])?;
-        let git_gid = project_lock::numeric_identity("id", &["-g", "git"])?;
+        fs::DirBuilder::new().mode(0o700).create(&repo)?;
         crate::permissions::set_directory_owner(&repo, git_uid, git_gid)?;
-
+        fs::set_permissions(&repo, fs::Permissions::from_mode(0o750))?;
+        File::open(&repo)?.sync_all()?;
         let status = Command::new("/usr/sbin/runuser")
             .args([
                 "-u",
                 "git",
                 "--",
+                "/usr/bin/env",
+                "GIT_CONFIG_NOSYSTEM=1",
                 "git",
                 "init",
                 "--bare",
@@ -460,10 +483,31 @@ fn project_create(args: &[String]) -> Result<()> {
                 bail!("git config failed")
             }
         }
-        fs::create_dir_all(repo.join("refs/kilnr/jobs"))?;
-        Command::new("setfacl")
+        create_owned_directory(&repo.join("refs/kilnr"), git_uid, git_gid, 0o750)?;
+        create_owned_directory(&repo.join("refs/kilnr/jobs"), git_uid, git_gid, 0o750)?;
+        let status = Command::new("setfacl")
             .args(["-R", "-m", "u:kilnr:rX", repo.to_str().unwrap()])
             .status()?;
+        if !status.success() {
+            bail!("cannot grant repository read access to kilnr")
+        }
+        let status = Command::new("/usr/bin/find")
+            .arg(&repo)
+            .args([
+                "-type",
+                "d",
+                "-exec",
+                "setfacl",
+                "-m",
+                "d:u:kilnr:r-x",
+                "{}",
+                "+",
+            ])
+            .status()?;
+        if !status.success() {
+            bail!("cannot grant inherited repository read access to kilnr")
+        }
+        crate::permissions::normalize_repository_refs(&repo, kilnr_uid)?;
         std::os::unix::fs::symlink(
             "/usr/local/libexec/kilnr/git-hooks/post-receive",
             repo.join("hooks/post-receive"),
@@ -471,9 +515,8 @@ fn project_create(args: &[String]) -> Result<()> {
         let defaults = read_json(Path::new("/etc/kilnr/defaults.json"))?;
         let config = new_project_config(project, &repo, &webhook, &defaults)?;
         atomic::write_json(&config_path, &config, 0o644)?;
-        fs::create_dir(&secret_dir)?;
-        fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o750))?;
-        atomic::write(&webhook, b"", 0o640)?;
+        create_owned_directory(&secret_dir, 0, kilnr_gid, 0o750)?;
+        atomic::write_owned(&webhook, b"", 0o640, 0, kilnr_gid)?;
         project_lock::provision(Path::new(LOCKS), &[project.into()])?;
         println!(
             "Created Kilnr project: {project}\nGit remote: ssh://git@<host>/srv/git/{project}.git"
@@ -679,7 +722,7 @@ fn webhook(args: &[String]) -> Result<()> {
     if !valid_webhook.is_match(value) {
         bail!("invalid Discord webhook URL")
     }
-    atomic::write(&expected, format!("{value}\n").as_bytes(), 0o640)?;
+    atomic::write_with_parent_group(&expected, format!("{value}\n").as_bytes(), 0o640)?;
     println!("Discord webhook configured for {}", args[0]);
     Ok(())
 }
@@ -1115,7 +1158,18 @@ fn git_key_add() -> Result<()> {
         bail!("invalid Ed25519 public key")
     }
     let path = Path::new("/srv/git/.ssh/authorized_keys");
-    let existing = fs::read_to_string(path).unwrap_or_default();
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.nlink() != 1 =>
+        {
+            bail!("unsafe authorized_keys file")
+        }
+        Ok(_) => fs::read_to_string(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
     if existing
         .lines()
         .any(|l| l.split_whitespace().nth(1) == key.split_whitespace().nth(1))
@@ -1123,13 +1177,13 @@ fn git_key_add() -> Result<()> {
         bail!("key already exists")
     }
     let forced = format!("command=\"git-shell -c \\\"$SSH_ORIGINAL_COMMAND\\\"\",restrict {key}\n");
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(forced.as_bytes())?;
-    f.sync_all()?;
+    let mut updated = existing.into_bytes();
+    if !updated.is_empty() && !updated.ends_with(b"\n") {
+        updated.push(b'\n');
+    }
+    updated.extend_from_slice(forced.as_bytes());
+    let (git_uid, git_gid) = account_identity("git")?;
+    atomic::write_owned(path, &updated, 0o600, git_uid, git_gid)?;
     println!("Git key added");
     Ok(())
 }
@@ -1218,6 +1272,21 @@ fn enqueue(args: &[String]) -> Result<()> {
     result?;
     println!("{id}");
     Ok(())
+}
+
+fn cleanup_entry(args: &[String]) -> Result<()> {
+    let (kilnr_uid, _) = account_identity("kilnr")?;
+    match unsafe { libc::geteuid() } {
+        0 => {
+            let error = Command::new("/usr/sbin/runuser")
+                .args(["-u", "kilnr", "--", &format!("{LIBEXEC}/cleanup")])
+                .args(args)
+                .exec();
+            Err(error).context("drop cleanup privileges to kilnr")
+        }
+        uid if uid == kilnr_uid => cleanup(args),
+        _ => bail!("cleanup must run as root or kilnr"),
+    }
 }
 
 fn cleanup(args: &[String]) -> Result<()> {

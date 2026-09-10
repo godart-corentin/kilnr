@@ -141,7 +141,26 @@ for project_config in /etc/kilnr/projects/*.json; do
     else
         install -o root -g kilnr-submit -m 0660 /dev/null "$project_lock"
     fi
-    install -d -o root -g kilnr -m 0750 "/etc/kilnr/secrets/$project_name"
+    secret_dir="/etc/kilnr/secrets/$project_name"
+    install -d -o root -g kilnr -m 0750 "$secret_dir"
+    for secret_file in "$secret_dir"/*.value "$secret_dir"/*.json; do
+        [[ -e "$secret_file" || -L "$secret_file" ]] || continue
+        [[ -f "$secret_file" && ! -L "$secret_file" ]] \
+            || die "unsafe secret entry: $secret_file"
+        [[ "$(stat -c '%h' "$secret_file")" == "1" ]] \
+            || die "secret entry has unexpected links: $secret_file"
+        chown root:kilnr "$secret_file"
+        chmod 0640 "$secret_file"
+    done
+done
+for webhook_file in /etc/kilnr/secrets/*.discord-webhook; do
+    [[ -e "$webhook_file" || -L "$webhook_file" ]] || continue
+    [[ -f "$webhook_file" && ! -L "$webhook_file" ]] \
+        || die "unsafe Discord webhook entry: $webhook_file"
+    [[ "$(stat -c '%h' "$webhook_file")" == "1" ]] \
+        || die "Discord webhook entry has unexpected links: $webhook_file"
+    chown root:kilnr "$webhook_file"
+    chmod 0640 "$webhook_file"
 done
 install -d -o root -g root -m 0755 /usr/local/libexec/kilnr /usr/local/libexec/kilnr/git-hooks
 # Remove obsolete helper modules from installations created before the Rust
@@ -180,6 +199,14 @@ done
 
 /usr/local/libexec/kilnr/permissions --provision-lock-namespace /var/lib/kilnr
 /usr/local/libexec/kilnr/permissions --normalize-builds /var/lib/kilnr/builds
+for project_config in /etc/kilnr/projects/*.json; do
+    [[ -e "$project_config" ]] || continue
+    project_name="$(basename "$project_config" .json)"
+    [[ "$project_name" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || continue
+    repository="/srv/git/${project_name}.git"
+    [[ -d "$repository" ]] || continue
+    /usr/local/libexec/kilnr/permissions --normalize-repository "$repository"
+done
 
 for name in doctor network-setup network-teardown; do
     install -o root -g root -m 0755 "$ROOT_DIR/libexec/$name" "/usr/local/libexec/kilnr/$name"

@@ -63,8 +63,8 @@ pub fn store(root: &Path, project: &str, name: &str, data: &[u8], kind: &str) ->
         std::str::from_utf8(data).context("text secret must be valid UTF-8")?;
     }
     let (value, metadata) = paths(root, project, name)?;
-    atomic::write(&value, data, 0o640)?;
-    atomic::write_json(
+    atomic::write_with_parent_group(&value, data, 0o640)?;
+    atomic::write_json_with_parent_group(
         &metadata,
         &SecretMetadata {
             schema: 1,
@@ -85,7 +85,9 @@ pub fn metadata(root: &Path, project: &str, name: &str) -> Result<SecretMetadata
             bail!("unsafe secret path: {}", candidate.display())
         }
     }
-    let data: SecretMetadata = serde_json::from_slice(&fs::read(path)?)?;
+    let data: SecretMetadata = serde_json::from_slice(
+        &fs::read(&path).with_context(|| format!("cannot read secret metadata for {name:?}"))?,
+    )?;
     if data.schema != 1 || data.scope != "release" || !matches!(data.kind.as_str(), "text" | "file")
     {
         bail!("invalid secret metadata for {name:?}")
@@ -95,7 +97,8 @@ pub fn metadata(root: &Path, project: &str, name: &str) -> Result<SecretMetadata
 
 pub fn read(root: &Path, project: &str, name: &str) -> Result<Vec<u8>> {
     metadata(root, project, name)?;
-    Ok(fs::read(paths(root, project, name)?.0)?)
+    let value = paths(root, project, name)?.0;
+    fs::read(value).with_context(|| format!("cannot read secret value for {name:?}"))
 }
 
 pub fn list(root: &Path, project: &str) -> Result<Vec<(String, SecretMetadata)>> {

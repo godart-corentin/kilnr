@@ -189,6 +189,42 @@ fn test_project_rename_cli_dispatch_and_installation() {
 }
 
 #[test]
+fn test_release_secrets_remain_readable_by_the_controller_group() {
+    let install = read("install.sh");
+    assert!(install.contains("chown root:kilnr \"$secret_file\""));
+    assert!(install.contains("chown root:kilnr \"$webhook_file\""));
+
+    let secrets = read("src/secrets.rs");
+    assert!(secrets.contains("write_with_parent_group(&value"));
+    assert!(secrets.contains("write_json_with_parent_group("));
+
+    let ops = read("src/ops.rs");
+    assert!(ops.contains("write_owned(&webhook"));
+    assert!(ops.contains("write_with_parent_group(&expected"));
+}
+
+#[test]
+fn test_privileged_helpers_restore_service_identities() {
+    let ops = read("src/ops.rs");
+    for fragment in [
+        "permissions::set_directory_owner(&repo, git_uid, git_gid)",
+        "create_owned_directory(&secret_dir, 0, kilnr_gid, 0o750)",
+        "permissions::normalize_repository_refs(&repo, kilnr_uid)",
+        "atomic::write_owned(path, &updated, 0o600, git_uid, git_gid)",
+        "\"cleanup\" => cleanup_entry(args)",
+        "drop cleanup privileges to kilnr",
+    ] {
+        assert!(ops.contains(fragment), "{fragment}");
+    }
+
+    let atomic = read("src/atomic.rs");
+    assert!(atomic.find("libc::fchown") < atomic.find("set_permissions"));
+
+    let install = read("install.sh");
+    assert!(install.contains("permissions --normalize-repository \"$repository\""));
+}
+
+#[test]
 fn test_uninstall_purge_is_explicit_guarded_and_comprehensive() {
     let script = read("uninstall.sh");
     for fragment in [
