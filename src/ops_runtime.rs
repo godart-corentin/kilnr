@@ -1,5 +1,5 @@
 use crate::{artifacts, atomic, pipeline, retention, runtime as runtime_helpers};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use regex::Regex;
@@ -510,6 +510,8 @@ fn run_job(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = docker.spawn()?;
+    let stdout = runtime_helpers::drain(child.stdout.take().context("Docker stdout unavailable")?);
+    let stderr = runtime_helpers::drain(child.stderr.take().context("Docker stderr unavailable")?);
     let timeout = Duration::from_secs(rt["runner"]["timeout_seconds"].as_u64().unwrap());
     let clock = Instant::now();
     let mut polling_error = None;
@@ -547,10 +549,16 @@ fn run_job(
         }
         thread::sleep(Duration::from_millis(100))
     };
-    let output = child.wait_with_output()?;
+    child.wait()?;
+    let stdout = stdout
+        .join()
+        .map_err(|_| anyhow!("Docker stdout reader panicked"))??;
+    let stderr = stderr
+        .join()
+        .map_err(|_| anyhow!("Docker stderr reader panicked"))??;
     let tokens = runtime_helpers::redaction_tokens(&secret_stage.redaction_values);
     let bytes = runtime_helpers::redact_text(
-        String::from_utf8_lossy(&[output.stdout, output.stderr].concat()).into_owned(),
+        String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned(),
         &tokens,
     )
     .into_bytes();

@@ -5,8 +5,10 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
+use std::io::{self, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 
 pub fn write_json(path: &Path, value: &Value) -> Result<()> {
     atomic::write_json(path, value, 0o640)
@@ -344,6 +346,17 @@ pub fn redaction_tokens(values: &[String]) -> Vec<String> {
     let mut result = tokens.into_iter().collect::<Vec<_>>();
     result.sort_by_key(|value| std::cmp::Reverse(value.len()));
     result
+}
+
+/// Read a child's pipe to its end on its own thread. A job polled with
+/// `try_wait` must have its pipes drained meanwhile: once one holds more than
+/// the kernel pipe buffer (64 KiB), the child blocks writing and never exits.
+pub fn drain<R: Read + Send + 'static>(mut pipe: R) -> JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
 }
 
 pub fn redact_text(mut text: String, tokens: &[String]) -> String {
